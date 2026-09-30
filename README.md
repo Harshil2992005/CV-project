@@ -1,258 +1,334 @@
 # Camera-Based Conveyor Inspection & Tracking System
 
-Classical OpenCV only (no deep learning). One camera watches a conveyor belt; from the video we get
-**where** each box is, **how big** it is (cm), **how fast** the belt moves and **what type** each box is.
+A single ceiling camera watches a conveyor belt. This turns that raw video into
+**measurements**: where each box is, how big it is in cm, how fast the belt is
+moving, and what type each box is.
+
+**Classical computer vision only — OpenCV, NumPy, SciPy, scikit-image, scikit-learn.
+No deep learning, no pretrained models, no neural networks.**
 
 ```
-frame -> A segment -> D Kalman tracks -> B px->cm -> C belt speed (optical flow) -> E box type
+video frame
+   │
+   ├─ A  Segmentation          find and separate the boxes in this frame
+   ├─ D  Kalman tracking       follow each box across frames, keep a stable ID
+   ├─ B  Camera calibration    pixels → real centimetres
+   ├─ C  Optical flow          how fast is the belt moving?
+   └─ E  Recognition           which of the 3 box types is this?
+   │
+   └──▶  ID · size (cm) · speed (cm/s) · type     +  annotated video
 ```
+
+---
+
+## Table of contents
+
+| | |
+|---|---|
+| [Quick start](#quick-start) | get it running in 3 commands |
+| [Results](#results) | what the modules actually produce |
+| [Repository layout](#repository-layout) | every file and what it does |
+| [Modules](#modules) | the 5 modules at a glance |
+| [Module A — Segmentation](#module-a--segmentation) | 5 methods compared on the same frames |
+| [Module B — Camera calibration](#module-b--camera-calibration) | the one step that needs your own photos |
+| [Module C — Optical flow](#module-c--optical-flow) | Lucas-Kanade from scratch + belt speed |
+| [Module D — Kalman tracking](#module-d--kalman-tracking) | a Kalman filter written by hand |
+| [Module E — Recognition](#module-e--recognition) | 4 classifiers compared on the same crops |
+| [The full pipeline](#the-full-pipeline) | all 5 modules chained |
+| [`--impl base` / `--impl alt`](#the-impl-switch) | 20 alternative implementations behind one flag |
+| [Honest limitations](#honest-limitations) | what this does *not* do |
+| [Requirements](#requirements) | dependencies |
+
+---
 
 ## Quick start
-
-```bash
-pip install -r requirements.txt
-
-python belt_roi.py --video assets/video/sd_conveyor_2.mp4 --save   # once per video
-python pipeline.py --video assets/video/sd_conveyor_2.mp4          # all 5 modules chained
-python live_demo.py                                               # live window
-```
-
-On Windows, `START_HERE.bat` or `run_all.bat` runs every module in order and pauses
-between steps so the output can be read. Add `alt` as the argument (`run_all.bat alt`)
-to run the alternative code paths instead.
-
-## Contents
-
-| Section | What is inside |
-|---|---|
-| [Folder layout](#folder-layout) | what every file and folder is for |
-| [Modules](#modules-run-each-alone) | the five modules, A to E, and the command for each |
-| [Module B - camera calibration](#module-b---camera-calibration-the-one-step-that-needs-you-in-the-loop) | the one step that needs your own photos |
-| [Full pipeline](#full-pipeline) | A + D + B + C + E chained together |
-| [What each module demonstrates](#what-each-module-demonstrates-max-5-sentences-each) | five sentences per module |
-| [What is new in v2](#what-is-new-in-v2) | the `--impl base` / `--impl alt` switch |
-
-## Folder layout
-```
-CV-project/
-|-- assets/
-|   |-- video/            4 clips; sd_conveyor_2.mp4 is the default
-|   |-- checkerboard/     board.html + board.png (printable) + YOUR photos
-|   |-- reference_set/    OpenCV's public sample images - reference only
-|   |-- crops/0,1,2       box samples per type, for Module E
-|   |-- belt_roi.json     belt area, bound to one video
-|   `-- *.png / *.mp4     outputs written by the modules
-|-- moduleA/  segmentation          5 methods compared on the same frames
-|-- moduleB/  make_checkerboard     prints the calibration board
-|            calibrate             recovers K + distortion  <- needs your photos
-|            measure_box           box size in cm under 4 camera models
-|            decompose_P           P = K[R|t], and unpacking it
-|-- moduleC/  optical_flow          hand-built Lucas-Kanade + belt speed
-|-- moduleD/  kalman_tracker        Kalman filter from scratch
-|-- moduleE/  recognize             eigenboxes / alignment / Hu moments
-|-- belt_roi.py  box_detect.py  select_roi.py     shared helpers
-|-- pipeline.py  live_demo.py  run_all.bat  run_live_demo.bat  all modules chained
-|-- impl.py                     the base / alt switch (new in v2)
-|-- calibaration.ipynb               Module B, step by step (learning)
-`-- Building a ... .docx             the written report
-```
-
-## Setup
-
-Python 3.10 or newer.
 
 ```bash
 git clone https://github.com/Harshil2992005/CV-project.git
 cd CV-project
 
 python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# macOS / Linux
-source .venv/bin/activate
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # macOS / Linux
 
 pip install -r requirements.txt
 ```
 
-| Dependency | Used for |
+Then:
+
+```bash
+python pipeline.py --video assets/video/sd_conveyor_2.mp4
+```
+
+That runs all five modules over the whole clip and prints one row per tracked box.
+It works out of the box — every output is in **pixels**, because pixels need no
+calibration. To get real centimetres you need Module B; see
+[Module B](#module-b--camera-calibration).
+
+### Windows
+
+| Script | What it does |
 |---|---|
-| `opencv-python` | camera, `calibrateCamera`, `findHomography`, drawing |
-| `numpy` | all the array maths |
-| `scipy` | RQ decomposition, Hungarian matching |
-| `matplotlib` | the saved plots |
-| `scikit-image` | watershed, Felzenszwalb, mean shift, N-Cut, Otsu |
-| `scikit-learn` | PCA for eigenboxes |
+| `START_HERE.bat` | interactive menu — self-check, full pipeline, cm run, alt mode, live view |
+| `run_all.bat` | runs every module in order, pauses between each one |
+| `run_live_demo.bat` | live window only |
 
-Put your videos in `assets/video/` (default: `sd_conveyor_2.mp4`, change with `--video`).
-Real footage only (own phone video or a public clip).
+`run_all.bat alt` / `run_live_demo.bat alt` run the
+[alternative implementations](#the-impl-switch).
 
-## Step 0 - belt ROI (do this once per video)
+### Live view
+
+```bash
+python live_demo.py                         # live window, loops forever
+python live_demo.py --headless 200          # 200 frames, writes assets/live_snapshot.png
 ```
-python belt_roi.py --video assets/video/sd_conveyor_2.mp4 --save     # automatic
-python select_roi.py --video assets/video/sd_conveyor_2.mp4          # or drag it by hand (best)
-python box_detect.py --video assets/video/sd_conveyor_2.mp4 --frame 150   # check the detection
-```
-The ROI file remembers its video, so it is never applied to another video by mistake.
-Green = clean box, orange = box cut by the belt edge (its size is NOT measured).
 
-## Belt speed needs `--gap 8`, not the default 1
+Keys: `q` quit · `space` pause · `s` save a snapshot.
 
-The belt moves ~0.3 px per frame, which is at the noise floor of sparse
-optical flow. With the default `--gap 1` the estimate is off by ~40 %.
-`--gap 8` averages the motion over 8 frames and is much more stable:
+---
 
-| `--gap` | reported | measured truth |
+## Results
+
+Everything below is generated by the code in this repo, not screenshots taken by hand.
+
+| Module | Output | What you see |
 |---|---|---|
-| 1 | 12.0 px/s | 8.6 px/s |
-| 4 | 6.9 px/s | 8.6 px/s |
-| 8 | **10.4 px/s** | 8.6 px/s |
+| A | [`assets/segmentation_grid.png`](assets/segmentation_grid.png) | 5 frames × 5 segmentation methods side by side |
+| B | [`assets/undistort_demo.png`](assets/undistort_demo.png) | checkerboard photo before / after undistortion |
+| C | [`assets/flow_arrows.png`](assets/flow_arrows.png)<br>[`assets/flow_sparse.png`](assets/flow_sparse.png)<br>[`assets/flow_affine.png`](assets/flow_affine.png) | dense flow, sparse corners, RANSAC affine inliers/outliers |
+| D | [`assets/kalman_plot.png`](assets/kalman_plot.png)<br>[`assets/kalman_overlay.mp4`](assets/kalman_overlay.mp4) | raw detections vs. filtered trajectory, x and y |
+| E | [`assets/eigenboxes_accuracy.png`](assets/eigenboxes_accuracy.png)<br>[`assets/eigenboxes_eigenvectors.png`](assets/eigenboxes_eigenvectors.png) | accuracy bar chart, top 3 eigenboxes |
+| — | [`assets/pipeline_output.mp4`](assets/pipeline_output.mp4)<br>[`assets/live_snapshot.png`](assets/live_snapshot.png) | the full pipeline, annotated |
 
-(Truth = median corner displacement over 100 frames with a forward-backward
-check, i.e. 4 s of video, so the motion is large enough to measure reliably.)
+---
 
-Two more things worth knowing:
+## Repository layout
 
-* The belt surface in these clips is almost textureless, so very few trackable
-  corners sit on it. Most corners in the belt ROI are on the **static
-  background**, and RANSAC keeps the largest consensus - which is the static
-  part. That is why the reported inlier ratio is low (50/128); it is expected,
-  not a bug. `optical_flow.py` fits the model on the largest clean **box**
-  (a box rides the belt and is textured), which is why it is the accurate path.
-* `pipeline.py` prints its own belt speed from `estimate_belt_motion()`, which
-  fits the **whole ROI** instead of a box, so that number reads low. Use the
-  standalone `optical_flow.py --gap 8` figure for the report.
-
-## Modules (run each alone)
-| Module | Command | Output |
-|---|---|---|
-| A | `python moduleA/segmentation.py` | `assets/segmentation_grid.png` |
-| B | `python moduleB/make_checkerboard.py` -> `python moduleB/calibrate.py assets/checkerboard` -> `python moduleB/measure_box.py moduleB/calibration.json` -> `python moduleB/decompose_P.py moduleB/calibration.json` | `calibration.json`, `assets/undistort_demo.png`, 4-model size table |
-| C | `python moduleC/optical_flow.py --px-per-cm 20 --gap 8` | `flow_arrows.png`, `flow_sparse.png`, `flow_affine.png`, belt speed |
-| D | `python moduleD/kalman_tracker.py` | `kalman_plot.png`, `kalman_overlay.mp4`, printed predict/measure/update |
-| E | `python moduleE/recognize.py` (`--recollect` to redo crops) | crops, `eigenboxes_eigenvectors.png`, accuracy table |
-
-## Module B - camera calibration (the one step that needs you in the loop)
-
-Every other module runs as-is. Module B cannot: it needs **real photos of a
-printed checkerboard**, and those only you can shoot. This is the whole checklist.
-
-### Step 1 - print the board
 ```
+CV-project/
+├─ assets/
+│  ├─ video/                 4 conveyor clips; sd_conveyor_2.mp4 is the default
+│  ├─ checkerboard/          board.png (printable) + board.html + your photos
+│  ├─ reference_set/         13 public OpenCV sample images, for calibration testing
+│  ├─ crops/0,1,2/           15 box crops per type, used by Module E
+│  ├─ belt_roi.json          the belt rectangle, bound to one specific video
+│  └─ *.png / *.mp4          everything the modules write
+├─ moduleA/segmentation.py   5 segmentation methods compared
+├─ moduleB/
+│  ├─ make_checkerboard.py   prints a checkerboard of a known real size
+│  ├─ calibrate.py           recovers K + lens distortion  ← needs your photos
+│  ├─ decompose_P.py         P = K[R|t], and unpacking it again
+│  ├─ measure_box.py         box size in cm under 4 camera models
+│  ├─ calibration.json       the result
+│  └─ calibration_reference.json   same, built from reference_set/
+├─ moduleC/optical_flow.py   Lucas-Kanade from scratch + belt speed
+├─ moduleD/kalman_tracker.py Kalman filter from scratch + multi-box tracker
+├─ moduleE/recognize.py      4 box-type classifiers compared
+├─ belt_roi.py               find / load / save the belt rectangle
+├─ box_detect.py             the shared box detector every other file uses
+├─ select_roi.py             pick the belt rectangle with the mouse
+├─ impl.py                   the base/alt switch
+├─ pipeline.py               all 5 modules chained
+├─ live_demo.py              the same thing, live, with keyboard control
+├─ calibaration.ipynb        Module B explained step by step, for learning
+├─ run_all.bat · START_HERE.bat · run_live_demo.bat
+└─ Building a ... .docx      the project brief this was built from
+```
+
+Paths are resolved against the project root from inside the Python files, so
+run everything from the repo root.
+
+---
+
+## Modules
+
+| | Module | Command | Output |
+|---|---|---|---|
+| **A** | Segmentation | `python moduleA/segmentation.py` | `segmentation_grid.png` |
+| **B** | Calibration | `python moduleB/make_checkerboard.py`<br>`python moduleB/calibrate.py assets/checkerboard --cols 9 --rows 6 --square-mm 24`<br>`python moduleB/decompose_P.py moduleB/calibration.json`<br>`python moduleB/measure_box.py moduleB/calibration.json` | `calibration.json`, `undistort_demo.png`, a 4-model size table |
+| **C** | Optical flow | `python moduleC/optical_flow.py --gap 8` | 3 flow images + belt speed |
+| **D** | Tracking | `python moduleD/kalman_tracker.py` | `kalman_plot.png`, `kalman_overlay.mp4`, printed predict/measure/update |
+| **E** | Recognition | `python moduleE/recognize.py` | 2 images + a 4-classifier accuracy table |
+
+Every script also accepts `--impl alt`. See [the switch](#the-impl-switch).
+
+---
+
+## Module A — Segmentation
+
+Five classical methods run on the **same 5 frames**, sampled between 10 % and 90 %
+of the clip, and drawn into one grid. One row per frame, one column per method,
+plus the untouched original as the first column.
+
+| Method | Where it comes from |
+|---|---|
+| **Watershed** | `cv2.watershed` on a distance transform — one marker per box |
+| **Split & merge** | written from scratch: quadtree split on variance, union-find merge on brightness difference |
+| **Felzenszwalb** | `skimage.segmentation.felzenszwalb` — graph-based |
+| **Mean shift** | `sklearn.cluster.MeanShift` over a 5-D colour+position feature space |
+| **N-Cut** | `skimage.graph.cut_normalized` over a SLIC superpixel graph |
+
+```bash
+python moduleA/segmentation.py --video assets/video/sd_conveyor_2.mp4
+python moduleA/segmentation.py --impl alt      # alt watershed seeds + own border drawing
+```
+
+**Why watershed is the one the detector uses.** The colour-only methods
+(split & merge, Felzenszwalb, mean shift) merge two touching boxes of similar
+colour into a single region — they have no idea where one box ends and the next
+begins. Watershed places a marker inside every box and grows the regions outward,
+so it separates them. The grid image shows this directly.
+
+N-Cut is global and expensive, so it runs on a small superpixel graph.
+Mean shift and N-Cut downscale first, because both are slow at full resolution.
+
+If one method throws, the grid prints `FAILED: <exception>` in that cell and
+carries on — one broken method cannot take down the whole comparison.
+
+---
+
+## Module B — Camera calibration
+
+Every other module runs as-is. **Module B cannot**, because it needs real
+photos of a printed checkerboard, and only you can take those. This is the
+entire checklist.
+
+### Step 1 — print the board
+
+```bash
 python moduleB/make_checkerboard.py --cols 9 --rows 6 --square-mm 24
 ```
-Prints `assets/checkerboard/board.png` (9x6 squares, 24 mm each, 300 dpi).
 
-> **`--cols` and `--rows` are SQUARES, not corners.** A 9x6 grid of squares has
-> **8x5 inner corners** - `calibrate.py` does that conversion itself
-> (`pattern = (cols-1, rows-1)`). So do **not** "correct" the flags to `--cols 8
-> --rows 5` because you read somewhere that a 9x6 board has 8x5 corners. Pass the
-> number of **squares** you printed, exactly as shown above.
->
-> Verified on this exact file: detected cleanly at pattern (8, 5), 283.00 px per
-> square = 24.0 mm, whole sheet 263.6 x 191.7 mm, so it prints on one A4.
+Writes `assets/checkerboard/board.png` — a 9×6 square grid at 300 dpi with a
+one-square white margin, plus `board.html` if you prefer to print from a browser.
 
-* **Print at 100 % scale.** Turn OFF *fit to page* / *shrink to fit*. If the
-  printer scales it, every square is the wrong size and K comes out wrong.
-* **Measure one square with a ruler.** If it is not 24 mm, re-run with the real
-  number: `--square-mm 23.8`, say. This value is the truth you are calibrating
+> **`--cols` and `--rows` are SQUARES, not corners.**
+> A 9×6 grid of squares has **8×5 inner corners**, and `calibrate.py` does that
+> subtraction itself. Pass the number of squares you printed — do not "fix" the
+> flags to `--cols 8 --rows 5` because you read somewhere that a 9×6 board has
+> 8×5 corners.
+
+- Print at **100 % scale**. Turn off *fit to page* / *shrink to fit*. If the
+  printer rescales the page, every square is the wrong size and `K` comes out wrong.
+- **Measure one square with a ruler.** If it is 23.8 mm, re-run with
+  `--square-mm 23.8`. This number is the ground truth you are calibrating
   against, so do not trust the printer dialog.
-* Print on **plain matte paper**, not glossy - gloss creates reflections that
-  hide corners.
+- Use plain matte paper. Gloss creates reflections that hide corners.
 
-### Step 2 - take 15-20 photos into `assets/checkerboard/`
-* **Move the camera, not the board** - or if the camera is on a tripod, rotate
-  and tilt the board instead. Either way you need *variety*, not 20 copies of
-  the same pose.
-* Tilt the board left/right, up/down, and rotate it in-plane.
-* Keep the **whole board visible** with a small margin around it.
-* **One resolution, one camera.** `calibrate.py` skips any photo whose size
-  differs from the first one, so a phone that switches modes between photos will
-  silently throw half of them away.
-* Sharp, no motion blur, decent even light. Delete any blurry one.
-* Vary the distance too - some near, some further.
+### Step 2 — take 15–20 photos into `assets/checkerboard/`
 
-### Step 3 - learn it interactively (optional but recommended)
+- **Move the camera, not the board** — or with the camera on a tripod, rotate and
+  tilt the board instead. Either way you need *variety*, not 20 copies of one pose.
+- Tilt left/right, tilt up/down, rotate in-plane, vary the distance.
+- Keep the **whole board visible** with a small margin around it.
+- **One resolution, one camera.** `calibrate.py` silently discards any photo whose
+  size differs from the first one, so a phone that switches resolution between
+  shots will throw half of them away.
+- Sharp, no motion blur, even light. Delete the blurry ones.
+
+### Step 3 — learn it interactively (optional, recommended)
+
 Open `calibaration.ipynb` and run the cells top to bottom. It walks through what
-an image is, how corners are found, what K and `dist` mean, and it prints the
-same K that `calibrate.py` will produce. Useful when a step below fails and you
-want to know *which* stage is unhappy.
+an image is, how corners are found, what `K` and `dist` mean, and prints the same
+`K` that `calibrate.py` will produce. Useful when a step below fails and you want
+to know which stage is unhappy.
 
-### Step 4 - calibrate
-```
-python moduleB/calibrate.py assets/checkerboard --cols 9 --rows 6 --square-mm 24 ^
+### Step 4 — calibrate
+
+```bash
+python moduleB/calibrate.py assets/checkerboard --cols 9 --rows 6 --square-mm 24 \
        --out moduleB/calibration.json
 ```
-It prints one line per photo (`[+] name` = accepted, `[!] skip ...` = rejected
-with the reason) and finishes with the RMS re-projection error.
 
-* **Success = RMS < 1.0 px.** Above 1.0, the result is not trustworthy - the usual
-  causes are a mis-sized print, too few good photos, blurry shots, or photos all
-  from nearly the same angle.
-* It refuses to run with fewer than 3 accepted photos (10-15 is the comfortable
-  minimum). If it says *"Need at least 3 good photos"*, read the per-photo skip
-  lines above - they tell you exactly which ones failed and why.
-* It also writes `assets/undistort_demo.png` (before | after side by side).
-  **Look at it.** If the "after" image does not have straight, unwarped lines
-  where the board's squares are, something is wrong even if RMS looks okay.
-* **Do not rename or re-copy `board.png` in there.** It is the *printable* board,
-  not a photo. It is flat and perfect, so corners are found in it and it will
-  quietly poison the calibration. `calibrate.py` skips the exact name
-  `board.png` - so a copy named `my_copied_board.png` is *not* skipped and will
-  ruin the result.
+It prints one line per photo — `[+] name` accepted, `[!] skip ...` rejected with
+the reason — and finishes with the RMS re-projection error.
 
-### Step 5 - decompose P = K[R|t]
-```
+- **Aim for RMS < 1.0 px.** The code prints it but does not enforce a threshold;
+  the only hard gate is **at least 3 accepted photos** (10–15 is comfortable).
+  Above 1 px the usual causes are a mis-sized print, too few good photos, blurry
+  shots, or photos all from nearly the same angle.
+- It always writes `assets/undistort_demo.png`, before | after side by side.
+  **Look at it.** If the "after" half does not have straight, unwarped lines where
+  the board's squares are, something is wrong even if the RMS looks fine.
+- **Never leave a copy of `board.png` in that folder.** The check is by exact
+  filename, so only `board.png` is skipped — a copy called `my_board_copy.png` is
+  *not* skipped, corners are found in it, and it quietly poisons the result.
+  (`v2_board.png` is a printable board too, and is likewise not skipped.)
+
+### Step 5 — decompose P = K[R|t]
+
+```bash
 python moduleB/decompose_P.py moduleB/calibration.json
 ```
-Builds P = K[R|t] and unpacks it again with an RQ decomposition, then
-cross-checks against `cv2.decomposeProjectionMatrix`. Run it with **no argument**
-if you have no photos yet - it falls back to a synthetic example that still
-demonstrates the maths.
 
-### Step 6 - measure a real box in cm
-```
+Builds `P = K[R|t]`, unpacks it again with an RQ decomposition, and cross-checks
+against `cv2.decomposeProjectionMatrix`. Before touching your data it runs a
+self-test on **20 random matrices with known answers** (fixed seed) and reports
+the worst error. Run it with **no argument** if you have no photos yet — it falls
+back to a synthetic example that still demonstrates the maths.
+
+### Step 6 — measure a real box in cm
+
+```bash
 python moduleB/measure_box.py moduleB/calibration.json
 ```
-It asks for four things: the reference box's real size in cm, its size in pixels,
-the unknown box's size in pixels, and the camera height above the belt. It then
-prints the unknown box under four camera models. **Full perspective (model 4) is
-the accurate one** - it divides by that box's own depth, while the other three
-assume one shared scale and drift as size or depth moves away from the reference.
 
-### Step 7 - feed the scale back into the pipeline
-```
+It asks for four things: the reference box's real size in cm, its size in px, the
+unknown box's size in px, and the camera height above the belt. Then it prints
+the unknown box under four camera models, each with a reference self-check:
+
+| Model | Formula | Assumption |
+|---|---|---|
+| 1 Orthographic | `px / s`, one shared scale | depth is ignored entirely |
+| 2 Weak perspective | `px · Z₀ / f` | both boxes share an average depth |
+| 3 Affine | separate x and y scales | non-square pixels allowed |
+| 4 Full perspective | `px · Z / f` | each box's **own** depth |
+
+**Full perspective is the accurate one.** It divides by that box's own depth,
+while the other three assume one shared scale and drift as size or depth moves
+away from the reference. A 1 m ceiling camera with a 10 cm height difference costs
+the other models roughly 10 %.
+
+**Read the reference-check column.** Pass a camera height inconsistent with your
+pixel measurements and the models will happily report 30 cm for a box that is
+really 20 cm. The self-check is what exposes that.
+
+`K` belongs to the resolution it was calibrated at. `measure_box.py
+--video-width` rescales it for you: the same physical setup referred to a 768 px
+wide video instead of 640 needs `fx` multiplied by `768/640 = 1.2`.
+
+### Step 7 — feed the scale back into the pipeline
+
+```bash
 python pipeline.py --calib moduleB/calibration.json --cam-height-cm 100 --box-height-cm 10
 ```
-`--cam-height-cm` = your camera's height above the belt (measure it).
-`--box-height-cm` = box height, used to correct for a box's top face being closer
-to the camera. Both are needed for the perspective-corrected scale.
 
-Until Step 4 succeeds, everything else runs in **pixels** and says so
+- `--cam-height-cm` — your camera's height above the belt. Measure it.
+- `--box-height-cm` — box height, used to correct for a box's top face being
+  closer to the camera than the belt.
+
+Until step 4 succeeds, everything runs in **pixels** and says so
 (`NOTE: no scale given -> pixels`), which is fine for modules A, C, D and E.
 
-### Reference run - proving the code works before you have photos
+### Reference run — proving Module B works before you have photos
 
-So that Module B is runnable and demonstrable today, the repo ships a
-**reference calibration** built from OpenCV's own public sample images.
+So that Module B is runnable today, the repo ships a **reference calibration**
+built from OpenCV's own public sample images.
 
-> **This is NOT your camera.** `assets/reference_set/` holds `left01.jpg` -
-> `left14.jpg` downloaded from the official `opencv/opencv` repo
-> (`samples/data`, 640x480). The saved file is
-> `moduleB/calibration_reference.json` - deliberately named `_reference` so it can
-> never be mistaken for your own `moduleB/calibration.json`.
+> **This is not your camera.** `assets/reference_set/` holds `left01.jpg` –
+> `left14.jpg` from the official `opencv/opencv` repo (`samples/data`, 640×480).
+> The result is saved as `moduleB/calibration_reference.json` — deliberately named
+> `_reference` so it can never be mistaken for your own `calibration.json`.
 >
 > Its only purpose is to prove the calibration code is correct. It must **not** be
-> used to state real centimetres for your conveyor video - see
-> "Absolute cm and third-party footage" below.
+> used to state real centimetres for your conveyor video.
 
-Reproduce it:
-
-```
-python moduleB/calibrate.py assets/reference_set --cols 10 --rows 7 --square-mm 24 ^
+```bash
+python moduleB/calibrate.py assets/reference_set --cols 10 --rows 7 --square-mm 24 \
        --out moduleB/calibration_reference.json
 ```
 
-Result - all 13 images accepted, well under the 1 px target:
+Result — all 13 images accepted, well under the 1 px target:
 
 ```
 RMS re-projection error: 0.2404 px   (aim < 1.0)
@@ -268,119 +344,265 @@ det(R2) = 1.0  (+1, so a proper rotation)
 OpenCV decomposeProjectionMatrix K matches: True
 ```
 
-**The four size models are only as good as your inputs.** If you claim a 20 cm box
-is 160 px wide, that pins the depth, and the perspective models will only
-reproduce 20 cm if the height you give matches it:
-
-```
-Z = real_cm * f / px = 20 * 532.535 / 160 = 66.57 cm
-```
-
-Pass `--cam-height-cm 66.57` and all four models agree exactly, which is the
-cheapest self-test the module has:
-
-```
-model                   unknown W x H (cm)    reference check (true 20.0x15.0)
-1 Orthographic             15.00 x 11.25           20.00 x 15.00
-2 Weak perspective         15.00 x 11.25           20.00 x 15.00
-3 Affine                   15.00 x 11.25           20.00 x 15.00
-4 Full perspective         15.00 x 11.25           20.00 x 15.00
-```
-
-Pass an inconsistent height (e.g. 100) and models 2 and 4 report 30.04 cm for a
-box that is really 20 cm - the reference check is what exposes it, so always read
-that column.
-
-K is resolution-dependent, and `measure_box.py --video-width` rescales it for you.
-Same physical setup, referred to a 768 px wide video instead of 640:
-
-```
-f = (639.0, 639.1) px      (was 532.5 at 640 px;  768/640 = 1.2)
-model 4 Full perspective   15.00 x 11.25 cm      unchanged, as it must be
-```
-
-### Absolute cm and third-party footage
-
-`assets/video/sd_conveyor_2.mp4` is third-party stock footage (768x432, 25 fps,
-generic `isom` MP4, no EXIF and no camera make/model). Its intrinsics are
-therefore **unknown and unrecoverable** - the re-encode means even the original
-resolution is gone. Stating a centimetre value for a box in that video would be
-an assumption, not a measurement.
-
-So, stated honestly:
-
-* **Modules A, C, D, E** run on the public clip and report **pixels**.
-* **Module B** is a real, self-captured calibration on your **own** phone
-  (`moduleB/calibration.json`, once you have taken the photos). That one is
-  genuine and reportable.
-* **Real centimetres** come from `measure_box.py` applied to imagery whose camera
-  you calibrated - e.g. one photo of a box you measured with a ruler, shot from a
-  height you measured, with `moduleB/calibration.json`. Run it on its own, not
-  through `pipeline.py` on the stock clip.
-
-The belt speed in cm/s elsewhere in this README is a **scale assumption**
-(`--px-per-cm`), not a calibration - it is a separate, clearly labelled number.
+Note `fx = 532.535` and `fy = 532.571` — the pixels are very slightly
+non-square, which is why `moduleB/measure_box.py` keeps separate `sx` and `sy`.
 
 ---
 
-## Full pipeline
+## Module C — Optical flow
+
+```bash
+python moduleC/optical_flow.py --gap 8 --px-per-cm 20
 ```
-python pipeline.py --video assets/video/sd_conveyor_2.mp4 --px-per-cm 20.5
+
+### Lucas-Kanade, written from scratch
+
+`lucas_kanade_dense` solves the 2×2 normal equations per pixel,
+
+```
+[Sxx Sxy] [u]   -[Sxt]
+[Sxy Syy] [v] = -[Syt]
+```
+
+over a 15 px window, with a **4-level coarse-to-fine pyramid** (3 Gauss-Newton
+iterations per level) and `cv2.remap` warping. The window sums use
+`cv2.boxFilter` with `normalize=False` — a plain box sum, not a mean.
+
+The **aperture problem** is handled explicitly: the smaller eigenvalue of the
+structure tensor is computed in closed form and pixels where it is too small are
+marked invalid. This is why dense flow is unreliable on a flat box face — the
+motion there is genuinely unobservable along one direction — while sparse
+corners stay robust.
+
+### Sparse corners + a RANSAC affine model
+
+A 6-parameter affine motion model is fitted over the box region:
+
+```
+u = a1 + a2·x + a3·y
+v = a4 + a5·x + a6·y
+```
+
+RANSAC rejects the outlier vectors — inliers green, outliers red in
+`flow_affine.png`. The model is fitted on the **largest clean box**, not on the
+whole belt, because the belt surface in these clips is almost textureless: most
+trackable corners in the ROI sit on the **static background**, so RANSAC would
+lock onto the largest consensus — which is the part that is not moving.
+
+### Belt speed
+
+```
+belt speed = ‖flow at the region centre‖ ÷ --gap  × fps  [÷ px-per-cm for cm/s]
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--gap` | `1` | frames between the two sampled frames |
+| `--frame` | `-1` | first frame of the pair; `-1` means the middle of the clip |
+| `--px-per-cm` | `0` | direct scale; `0` means derive it from `--calib` or skip |
+| `--calib` | `""` | calibration JSON, used together with `--cam-height-cm` |
+| `--cam-height-cm` | `0` | camera height above the belt, cm |
+
+**Use `--gap 8`, not the default `--gap 1`.** The belt moves only a fraction of a
+pixel per frame, which is at the noise floor of sparse optical flow — consecutive
+frames give a noisy, badly biased estimate. A larger `--gap` averages the motion
+over more frames and is much more stable, at the cost of the two frames being
+further apart. It is a signal-to-noise knob, not a correction.
+
+Without `--px-per-cm`, or `--calib` **and** `--cam-height-cm`, the script prints
+px/s and tells you how to get cm/s. Note the cm/s path uses only `fx`, one
+isotropic scale.
+
+Three images are written: `flow_arrows.png` (dense), `flow_sparse.png`
+(sparse corners), `flow_affine.png` (RANSAC inliers/outliers on the box region).
+
+---
+
+## Module D — Kalman tracking
+
+```bash
+python moduleD/kalman_tracker.py
+python moduleD/kalman_tracker.py --noise 2.0 --drop-after 25 --drop-len 5
+```
+
+A Kalman filter built on **NumPy only** — `cv2.KalmanFilter` is never used.
+
+```
+state  x = [x, y, vx, vy]        position and velocity, one step = one frame
+P      4×4 covariance             how unsure we are
+F      constant-velocity matrix
+H      we only ever SEE x and y
+Q      process noise              continuous white-noise-acceleration model
+R      measurement noise
+```
+
+Every frame runs the cycle explicitly and prints it:
+
+```
+frame   21 | predict (  123.4,  456.7) | measure (  124.1,  455.9) | update (  123.9,  456.5) | v=( 0.31, 0.02)
+```
+
+1. **PREDICT** — `x = Fx`, `P = FPFᵀ + Q`. Move the state forward with the last
+   known velocity and grow the uncertainty.
+2. **MEASURE** — the detector's `(cx, cy)` is the raw, noisy measurement.
+3. **UPDATE** — innovation `y = z − Hx`, `S = HP Hᵀ + R`, Kalman gain
+   `K = PHᵀ S⁻¹`, blend, then update `P`. When `P` is large the filter trusts the
+   prediction more; when `P` is small it trusts the measurement more.
+
+### Occlusion — pure prediction
+
+For `--drop-len` consecutive frames the measurement is discarded entirely. The
+filter keeps tracking on prediction alone and the overlay prints
+`OCCLUSION: prediction only`. This is **observability**: the state can still be
+inferred with no observations at all, because the motion model says where it
+should be. `assets/kalman_plot.png` overlays the raw noisy measurements and the
+filtered trajectory on the same axes.
+
+### Multi-box tracking
+
+`MultiTracker` extends this to every box in the frame. `pipeline.py` builds it
+with `max_dist = 0.12 × width`, `max_missed = 8`, `min_hits = 3`.
+
+- Tracks are matched to detections by **Hungarian assignment** on the Euclidean
+  distance between predicted and detected centroids, gated by `max_dist`.
+- An unmatched box starts a **new** track; it never takes over an existing ID.
+- A track survives up to 8 missed frames before it is retired, which is what lets
+  it coast through the occlusion above.
+- A track only counts as confirmed after 3 hits and no current miss.
+- Each track records a median size and a velocity history, and votes on its type
+  by **mode** over the frames it was seen.
+
+> `MultiTracker` is defined in `moduleD/kalman_tracker.py` but the module's own
+> `main()` demonstrates the single-filter path, which is what the brief asks for.
+> The multi-box tracker is what `pipeline.py` uses.
+
+---
+
+## Module E — Recognition
+
+```bash
+python moduleE/recognize.py
+python moduleE/recognize.py --recollect     # re-cut the crops from the video
+```
+
+### Where the training data comes from
+
+Crops are cut from the video with 12 % padding on each side — the margin matters,
+because the classifiers look at the silhouette *and* at the belt colour, so the
+crop has to contain some belt. Boxes cut off by the belt edge are skipped: a
+truncated box has no true size.
+
+Types are **not** labelled by hand. Each clean box is scored by
+`√(rw · rh)`, those scores are clustered into 3 groups by 1-D k-means, and the
+groups are renumbered so the smallest size is always class 0. The repo ships 15
+crops per class in `assets/crops/{0,1,2}/`.
+
+> **Honesty note:** these crops come from the **same physical boxes** seen in
+> different frames, so the numbers are honest held-out splits *across poses* —
+> not across different boxes.
+
+### The four classifiers
+
+| Classifier | Idea |
+|---|---|
+| **Eigenboxes** | Eigenfaces for boxes: PCA/SVD eigenspace over 64×64 crops, project the query in, classify by nearest neighbour in eigenspace. Top 3 eigenboxes are saved as an image. |
+| **Alignment** | ORB keypoints → BFMatcher → `findHomography` with RANSAC → score by mean inlier residual, with a `20 / n_inliers` penalty for having few inliers. Lower score wins. |
+| **Hu moments** | Isotropic silhouette extraction, `cv2.HuMoments`, log-transformed, nearest class centroid. Only **4 of the 7** moments are used — the higher ones are ~0 for near-symmetric boxes and only add noise. |
+| **Size-based** | `√(h·w)` compared against each class's centre. This is the one `pipeline.py` uses. |
+
+### The accuracy table
+
+Each classifier is tested on the held-out split plus three perturbations:
+
+```
+classifier     held-out   rotated   darker   brighter
+Eigenboxes           xx%       xx%      xx%       xx%
+Alignment            xx%       xx%      xx%       xx%
+Hu moments           xx%       xx%      xx%       xx%
+Size-based           xx%       xx%      xx%       xx%
+```
+
+- **rotated** — a random rotation, uniform in 20°–160°, on a belt-coloured canvas
+- **darker** — brightness × 0.6
+- **brighter** — brightness × 1.4
+
+The split is **stratified inside every class** (30 % test), so all four types
+appear in both parts.
+
+### What the results actually show
+
+- **Alignment survives lighting.** Keypoints look at local edges, not at how
+  bright things are. Eigenboxes store raw brightness, so a darker or brighter
+  test image moves it off the training manifold.
+- **Hu moments and the homography both absorb rotation.** Eigenboxes are not
+  rotation invariant at all.
+- **Hu moments cannot see size** — they are scale invariant — so they only
+  separate types that differ in shape or texture, not merely in size. That is
+  exactly why the size classifier is kept alongside them.
+
+---
+
+## The full pipeline
+
+```bash
+python pipeline.py --video assets/video/sd_conveyor_2.mp4
 python pipeline.py --calib moduleB/calibration.json --cam-height-cm 100 --box-height-cm 10
-python live_demo.py            # live window (or run_live_demo.bat on Windows)
+python pipeline.py --show                       # live window, q quits
+python pipeline.py --n-frames 200               # just the first 200 frames
 ```
-Prints per box: ID, size, speed, type, and saves `assets/pipeline_output.mp4`.
-Without `--px-per-cm` (or `--calib` + `--cam-height-cm`) everything is in **pixels** - real cm need a scale.
 
-## What each module demonstrates (max 5 sentences each)
-**A.** Five methods run on the same 5 frames: watershed, split & merge (from scratch), Felzenszwalb, mean shift and normalized cut.
-Colour-only methods (split & merge, Felzenszwalb, mean shift) merge touching boxes of the same colour into one region.
-Watershed uses a distance-transform marker per box, so it separates touching boxes best, and it is what the shared detector uses.
-N-Cut is global and heavy, so it runs on a small superpixel graph.
+Header, then progress, then one row per box:
 
-**B.** `calibrateCamera` recovers K (focal length, principal point) and radial distortion from checkerboard photos; success is RMS < 1 px.
-`decompose_P.py` builds P = K[R|t] and recovers K, R, t again with an RQ decomposition.
-With one reference box of known size, the unknown box is measured under orthographic, weak-perspective, affine and full-perspective models.
-Full perspective is the most accurate because it divides by each box's own depth; the other three assume one common scale.
+```
+[pipeline] impl=base  sd_conveyor_2.mp4  768x432  25.0 fps  ROI={'x': 0, 'y': 111, ...}
 
-**C.** Lucas-Kanade is solved from scratch (2x2 normal equations per window, coarse-to-fine) and compared with OpenCV sparse corner flow.
-On flat box faces dense flow is unreliable (aperture problem), while sparse corners stay robust.
-A 6-parameter affine flow model fitted with RANSAC rejects outlier vectors (inliers green, outliers red).
-Belt speed = flow at the region centre x fps / (px per cm).
+Belt speed (Module C, optical flow + RANSAC affine): 1.5 px/s
 
-**D.** A Kalman filter (state x, y, vx, vy; constant velocity) blends noisy detections with a motion prediction, giving a smoother path.
-The predict -> measure -> update cycle is printed for 13 consecutive frames including the occlusion.
-During the 3-5 frame dropout the filter keeps tracking with prediction only, which demonstrates observability.
-The tracker matches boxes to tracks with the Hungarian algorithm and only starts a track for unmatched boxes.
+  ID  frames             size         speed      type
+   1      24   279x181 px        2 px/s    large
+   2      18   153x120 px        2 px/s   medium
+  ...
+```
 
-**E.** Crops of 3 box types are cut from the video (clustered by size) or supplied by hand in `assets/crops/<type>/`.
-Eigenboxes (PCA + nearest neighbour), alignment (ORB + RANSAC homography residual), Hu moments and a size classifier are compared on held-out, rotated, darker and brighter test crops.
-Alignment and Hu moments survive lighting changes / rotation better than eigenboxes, which store raw brightness and orientation.
-Hu moments are scale invariant, so they separate types only when the types differ in shape, not just in size.
+Actual order of operations in the loop: **A** segments → **D** tracks →
+**C** measures belt motion → **E** types the crop and **B** converts its size.
+Boxes cut by the belt edge are excluded from the size and type report, because
+their size is not trustworthy.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--px-per-cm` | `0` | direct belt scale, px per cm |
+| `--calib` | `""` | calibration JSON (needs `--cam-height-cm`) |
+| `--cam-height-cm` | `0` | camera height above the belt, cm |
+| `--box-height-cm` | `0` | box height, for the top-face correction |
+| `--n-frames` | `0` | `0` = whole video |
+| `--min-frames` | `8` | drop tracks shorter than this from the report |
+| `--show` | off | live window, `q` quits |
+| `--no-static` | off | disable the background filter |
+
+Without a scale, every size and speed is in **pixels** and the run says so.
+
+The detector also runs a `BackgroundFilter`: it learns the room as a slowly
+updated background image and throws away detections that match it *and* have not
+moved. Without it, walls and floor get reported as boxes.
 
 ---
 
-## What is new in v2
+## The `--impl` switch
 
-This repo is a re-write of an earlier private version of the project. Every file has been given
-plain-English comments explaining the maths, and about thirty places now contain a
-**second way of doing the same thing**. Nothing is required: if you never type
-`--impl alt`, you get the original code and the original output.
+Every important step has a **second, independent implementation** sitting next to
+it. One flag chooses between them — 20 pairs in total, across all files.
 
-### The one switch: `--impl`
-
-Every script that contains an alternative takes one extra argument:
-
-```
-python <script> --impl base     the original code path      (this is the default)
-python <script> --impl alt      the alternative functions
+```bash
+python <script>                    # base — the default
+python <script> --impl alt         # alt  — the alternatives
 ```
 
-`impl.py` holds the whole mechanism. It is only 4 lines of real logic:
+`impl.py` holds the whole mechanism in about four lines of real logic:
 
 ```python
-MODE = "base"                            # the one line you can edit
-CHOICES = {"base", "alt"}
+MODE = "base"                             # the one line you can edit
+CHOICES = ("base", "alt")
 
 def is_alt():
     return MODE == "alt"
@@ -389,133 +611,134 @@ def dispatch(base_fn, alt_fn, *args, **kwargs):
     return alt_fn(*args, **kwargs) if is_alt() else base_fn(*args, **kwargs)
 ```
 
-`impl.py` is imported by every module, so setting `MODE = "alt"` in that one file
-switches the whole project over. `run_all.bat alt` does it from the command line
-instead, without editing anything.
+Every script calls `impl.add_impl_flag(parser)` then `impl.apply_args(args)`
+straight after `parse_args()`. You can also flip it from a Python shell with
+`impl.set_mode("alt")`, or set `MODE = "alt"` in `impl.py` to switch the whole
+project at once. `run_all.bat alt` does it from the command line without editing
+anything.
 
-Scripts with no alternatives (`moduleB/measure_box.py`, `moduleB/make_checkerboard.py`)
-have no `--impl` flag, because there is nothing to switch.
+`moduleB/measure_box.py` and `moduleB/make_checkerboard.py` have no `--impl`
+flag, because there is nothing to switch.
 
-### Run everything
+### What actually changes
 
-```
-run_all.bat           all modules, base mode, pauses between steps
-run_all.bat alt       all modules, alt mode
-```
+| Where | `base` | `alt` |
+|---|---|---|
+| `belt_roi.smooth_rows` | `np.convolve` moving average | `cv2.blur` + manual zero padding |
+| `belt_roi.rows_threshold` | hand-written histogram Otsu | `skimage.filters.threshold_otsu` |
+| `box_detect.otsu_threshold` | `cv2.threshold(THRESH_OTSU)` | `skimage.filters.threshold_otsu` |
+| `box_detect.clean_mask` | `cv2.morphologyEx` OPEN + CLOSE | explicit `cv2.erode` / `cv2.dilate` |
+| `box_detect.fill_holes` | `findContours` + `drawContours(-1)` | `cv2.floodFill` from the corner |
+| `box_detect.rect_corners` | `cv2.boxPoints` | hand-rolled corner search with `np.cos`/`np.sin` |
+| `moduleA` watershed markers | polygons from the shared detector | `skimage.feature.peak_local_max` on its own distance transform |
+| `moduleA` border drawing | `skimage.segmentation.mark_boundaries` | NumPy neighbour-label test |
+| `moduleB` corner finding | `findChessboardCornersSB` first | classic `findChessboardCorners` with `ADAPTIVE_THRESH` first |
+| `moduleB` RQ | `scipy.linalg.rq` | hand-written from `np.linalg.qr` |
+| `moduleC` gradients | `cv2.Sobel` | `skimage.filters.sobel` |
+| `moduleC` affine fit | hand-rolled 3-point RANSAC on raw coordinates | `cv2.estimateAffine2D(RANSAC)` on origin-centred coordinates |
+| `moduleD` 2×2 inverse | `np.linalg.inv` | closed form `1/(ad−bc)·[[d,−b],[−c,a]]` |
+| `moduleD` covariance | Joseph form `(I−KH)P(I−KH)ᵀ + KRKᵀ` | short form `(I−KH)P` |
+| `moduleD` matching | Hungarian `linear_sum_assignment` | greedy cheapest-pair-first |
+| `moduleE` lighting test | multiply brightness | gamma correction via `skimage.exposure` |
+| `moduleE` k-means | hand-written 1-D k-means | `sklearn.cluster.KMeans` |
+| `moduleE` Eigenboxes | `np.linalg.svd` | `sklearn.decomposition.PCA` |
+| `moduleE` size classifier | class median | 1-nearest-neighbour |
+| `moduleE` alignment score | `cv2.perspectiveTransform` | manual homogeneous divide |
 
-Or step by step:
+Most pairs agree exactly or to within a rounding error. Where they differ, both
+answers are reasonable and both run — the algorithm underneath is simply
+different. That is the point of having them.
 
-```
-python moduleA/segmentation.py
-python moduleB/calibrate.py assets/reference_set --cols 10 --rows 7 --square-mm 24 --out moduleB/calibration.json
-python moduleB/decompose_P.py moduleB/calibration.json
-python moduleB/measure_box.py --ref-cm 20 12 --ref-px 100 60 --unk-px 140 84 --cam-height-cm 120
-python moduleC/optical_flow.py
-python moduleD/kalman_tracker.py
-python moduleE/recognize.py
-python belt_roi.py
-python box_detect.py
-python pipeline.py
-python live_demo.py
-```
+### Two differences worth knowing about
 
-Add `--impl alt` to any of them to see the alternatives.
+**The affine fit conditioning.** In `alt`, `cv2.estimateAffine2D` is fitted
+around the point being measured rather than on raw pixel coordinates. With
+near-pure-translation motion the slope terms are decided by noise alone, and
+reading `1.0004 · 384` at the belt centre turns a 0.03 px error into ~150 px of
+error. Centring first makes the intercept the flow at the read point directly,
+which cannot be corrupted by the slopes.
 
-### The alternatives, and what actually changes
+**The covariance update.** Joseph form costs two extra matrix products but stays
+symmetric and positive definite. The short form is cheaper and, in floating
+point, slowly loses symmetry and is known to go unstable when the filter becomes
+very confident. The two are not equally safe — they just are both defensible.
 
-| Where | base (original) | alt (alternative) | Same output? |
-|---|---|---|---|
-| `box_detect.otsu_threshold` | histogram loop | `skimage.filters.threshold_otsu` | yes, to the last bit |
-| `box_detect.open_or_closed` | NumPy binary dilation | `cv2.morphologyEx` | yes |
-| `box_detect.fill_holes` | flood fill | convex-hull fill | yes on these boxes |
-| `box_detect.rect_from_contour` | `cv2.minAreaRect` | hand-rolled corner search | yes |
-| `belt_roi.smooth_mask` | box-blur in NumPy | `cv2.blur`, zero-padded | yes |
-| `moduleA` drawing | `skimage.segmentation.mark_boundaries` | NumPy label-neighbour test | yes |
-| `moduleA` watershed markers | `peak_local_max` on the distance map | OpenCV good-features + own sub-pixel peak | no, alt finds its own markers |
-| `moduleB` corner finding | `cv2.findChessboardCornersSB` | classic `findChessboardCorners` | no, RMS 0.24 px vs 0.41 px |
-| `moduleB` RQ | `scipy.linalg.rq` | hand-written from `np.linalg.qr` | yes to 1e-13 |
-| `moduleC` gradients | `skimage.color.rgb2gray` + Sobel | `cv2.cvtColor` + `cv2.Sobel` | no, last-digit noise |
-| `moduleC` affine fit | NumPy RANSAC | `cv2.findHomography` with RANSAC | no, ~5% different inliers |
-| `moduleD` covariance | Joseph form `(I-KH)P(I-KH)T+KRKT` | the short form `(I-KH)P` | no, alt is slightly tighter |
-| `moduleD` matching | Hungarian (`linear_sum_assignment`) | greedy cheapest-first | no, see the count below |
-| `moduleE` lighting test | multiply the brightness | gamma (`LUT`) | no, different darkening |
-| `moduleE` Eigenboxes | `np.linalg.svd` | `sklearn.decomposition.PCA` | yes |
-| `moduleE` size classifier | class median | 1-nearest-neighbour | no, 1 of 37 boxes changes type |
+### Measured: how much the pipeline output moves
 
-Where the table says **no**, the two answers are both reasonable and both run; they
-just are not the same number, because the algorithm underneath is different. That is
-the point of having them.
-
-#### What the pipeline actually looks like in each mode
-
-This is measured, not guessed. Both modes were run on `sd_conveyor_2.mp4` and the
-printed box tables were compared, matching boxes to each other by size:
+Both modes were run on `sd_conveyor_2.mp4` and the printed box tables compared,
+matching boxes to each other by size:
 
 ```
 tracks found:            base 37        alt 38
 same physical box:       36 of 37 matched one-to-one (within 1-2 px)
 differ ONLY in the ID:   19 of 36      <- just renumbering, cosmetic
-same frame count:        33 of 36
 same size:               34 of 36
 same speed:              33 of 36
 same TYPE:               35 of 36
 ```
 
-So of 37 boxes, **34 are reproduced exactly** and only three really move:
+Of 37 boxes, **34 are reproduced exactly**. The rest move for identifiable
+reasons: greedy matching split one track in half and glued ~7 more frames onto
+another, and the 1-NN size classifier reclassified one box. `alt` also invents
+one extra 8-frame spurious track, which is why its IDs drift upwards from a
+frame or two onward — one extra decision shifts every later number by one.
 
-| box | base | alt | why |
-|---|---|---|---|
-| 153x120 | id 66, 24 frames | id 68, 12 frames | greedy matching split this track in half |
-| 279x181 | id 73, 18 frames | id 67, 25 frames, 279x183 | greedy matching glued ~7 more frames on |
-| 88x31 | id 79, **medium** | id 80, **small** | the 1-NN size classifier, not the tracker |
-| 113x81 | id 98, 22 frames | id 95, 26 frames | greedy matching kept it alive 4 frames longer |
+None of that is a bug. Greedy matching and Hungarian matching are both valid
+answers to the same question, and they disagree exactly when one cheap pair has
+to be weighed against a better overall set of pairs. On a cluttered belt that
+happens; on clean footage they agree.
 
-`alt` also invents one extra short track, `83x27`, 8 frames long, which has no partner
-in base. That single spurious track is why the alt IDs drift upwards (66 becomes 68,
-70 becomes 71, and so on) - greedy made one extra decision somewhere around frame 200,
-and every later number shifts by one. Belt speed is identical at `1.5 px/s`.
+---
 
-None of this is a bug. Greedy matching and Hungarian matching are both valid answers
-to the same question, and they disagree exactly when one cheap pair has to be weighed
-against a better overall set of pairs. On a cluttered belt that happens; on clean
-footage they agree.
+## Honest limitations
 
+- **Centimetres need your own calibration.** `assets/video/sd_conveyor_2.mp4` is
+  stock footage — a re-encode with no EXIF and no camera make/model — so its
+  intrinsics are unknown and unrecoverable. Modules A, C, D and E run on that clip
+  and report **pixels**. Module B is real, self-captured calibration on your own
+  camera, and that one is genuine. Any cm/s number derived from a stock clip is a
+  **scale assumption** (`--px-per-cm`), clearly labelled as such, not a
+  measurement.
+- **Module C does not undistort.** The calibration JSON contains distortion
+  coefficients and nothing calls `cv2.undistort` on the video frames.
+- **`v2_board.png` is not skipped by `calibrate.py`.** Only the exact filename
+  `board.png` is. Delete it before calibrating on your own photos.
+- **No RMS threshold is enforced.** `calibrate.py` prints the RMS and advises
+  aiming under 1 px, but the only hard gate is 3 accepted photos.
+- **K is resolution-locked.** It belongs to the resolution the photos were taken
+  at. `--video-width` and `moduleC` rescale it; nothing else does.
+- **The Module E accuracy numbers split across poses, not across physical
+  boxes**, because the crops come from the same boxes seen in different frames.
+- **The belt ROI is bound to one video.** `assets/belt_roi.json` records which
+  video it was measured on and is ignored for any other, so it can never be
+  applied to the wrong clip by mistake.
 
-### How base mode was checked
+---
 
-Every module was run in `base` mode and its output compared line by line with the
-original project:
+## Requirements
 
-* Module A, B, C, D, E printouts: **identical** to the original.
-* `pipeline.py`: the tracked-box table is **identical**; only the new
-  `[pipeline] impl=base` header line is extra.
-* `belt_roi.py`: identical (`{'x': 0, 'y': 0, 'w': 768, 'h': 432}`).
-* `box_detect.py`: identical box lists on frames 76, 229, 383, 536, 689.
+Python 3.10 or newer.
 
-Two gotchas worth knowing:
+| Package | Used for |
+|---|---|
+| `opencv-python` | camera, `calibrateCamera`, `watershed`, `findHomography`, ORB, Hu moments, drawing |
+| `numpy` | all the array maths, the hand-written LK and Kalman filter |
+| `scipy` | RQ decomposition, Hungarian matching |
+| `matplotlib` | the saved plots (`Agg` backend, headless-safe) |
+| `scikit-image` | watershed, Felzenszwalb, N-Cut, SLIC, Otsu, gamma correction |
+| `scikit-learn` | Mean shift, KMeans, PCA, 1-NN — mainly on the `alt` paths |
 
-* `moduleE/recognize.py --recollect` re-cuts `assets/crops` from the video. The shipped
-  crops came from the original project, so re-cutting them shifts every accuracy number
-  a little (Eigenboxes goes 58% to 67%, for example). If you only want to look at the
-  shipped dataset, do **not** pass `--recollect`.
-* `calibaration.ipynb` and the report `.docx` are copied over from the original
-  unchanged. They are learning material, not code, and they do not know about `impl.py`.
+```bash
+pip install -r requirements.txt
+```
 
-`assets/belt_roi.json` is **not** shipped. `belt_roi.py` auto-detects the belt from the
-video when the file is missing, and on this clip it correctly returns the whole frame.
-Run `python belt_roi.py --save` to write the file if you want it fixed to one video.
+---
 
-Three bugs were found and fixed while doing this, all in `alt` code only, so `base`
-mode was never at risk:
+## Credits and data
 
-1. `moduleC` - the OpenCV affine fit was done on raw pixel coordinates, which are
-   large numbers and make the 2x2 system badly scaled. The belt speed came out as
-   `9601.5 px/s`. It now fits around the point being measured, giving `1.5 px/s`,
-   the same as base.
-2. `moduleB/decompose_P.py` - `rq_handmade` used the wrong flip order and returned
-   garbage (`K` all below 1). The correct identity is `M = J L Q' J` with `J` the
-   anti-diagonal; it now matches SciPy to `1e-13`.
-3. `moduleA` - the OpenCV border drawing passed an `int32` label image to
-   `cv2.Canny`, which only accepts `uint8`, so every method failed in `alt` mode.
-   The borders are now found by comparing neighbouring labels, which has no 8-bit
-   limit and is faster.
+- `assets/reference_set/left*.jpg` — OpenCV's public sample images, from
+  [`opencv/opencv`](https://github.com/opencv/opencv) `samples/data`. Used only to
+  prove the calibration code is correct.
+- `assets/video/*.mp4` — sample conveyor footage, used for the module demos.
+- `Building a Camera-Based Conveyor Inspection & Tracking System.docx` — the
+  project brief this was built against.
