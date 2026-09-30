@@ -1,0 +1,58 @@
+Building a Camera-Based Conveyor Inspection & Tracking System Type: Practical / implementation-based (no essay writing required)
+Suggested duration: 4–5 weeks
+Deliverable: Working code + a 10-minute recorded demo + a 1-page README (not a report) 1. The Scenario
+Continuing the warehouse theme: a single ceiling-mounted camera watches a conveyor belt carrying boxes. Your job is to turn raw video frames into real, usable measurements: where each box is, how big it actually is in centimeters (not pixels), how fast the belt is moving, and what type of box it is — using classical computer vision, not a pretrained deep model. You will build five modules, each mapping to a syllabus unit, then chain them into one pipeline that processes a short video clip.
+You may use a real short video you film yourself (a phone camera pointed at objects moving across a table works fine as a stand-in "conveyor belt"), or a public object-tracking dataset clip (e.g., a short clip from MOT/KITTI or any Kaggle conveyor/box dataset). Either is acceptable as long as it's real footage, not synthetic renders.
+2. Module Breakdown
+Module A — Segmentation: Finding the Boxes in Each Frame
+Topics covered: Active contours, split & merge, watershed, region splitting, region merging, graph-based segmentation, mean shift and mode finding, Normalized Cut
+Run at least 4 of the following 6 methods on the same set of 5 representative frames from your video, and compare results:
+1. Active contours (snakes): initialize a contour near a box edge and let it converge to the box boundary (skimage.segmentation.active_contour or your own energy-minimization loop). 2. Split & merge: implement quadtree-based split-and-merge segmentation from scratch (split a region if intensity variance exceeds a threshold; merge adjacent regions with similar mean intensity).
+3. Watershed: apply watershed segmentation (skimage/cv2.watershed) using distance-transform markers to separate touching/overlapping boxes.
+4. Region splitting & region merging (if not already covered by #2, implement them as two separate standalone passes so their individual behavior is visible).
+5. Graph-based segmentation: implement or use Felzenszwalb's graph-based method (skimage.segmentation.felzenszwalb) and inspect the resulting region graph.
+6. Mean shift / mode finding: cluster pixels in color+position feature space using mean shift (sklearn.cluster.MeanShift) to segment boxes by color region.
+7. Normalized Cut: apply spectral clustering / N-Cut (skimage.future.graph.cut_normalized or sklearn.cluster.SpectralClustering on a small superpixel graph) on at least one frame — N-Cut is computationally heavy, so it's fine to run it on a downsampled image.
+Deliverable: A notebook that loads the same 5 frames and outputs a grid image comparing all methods side by side, plus 3–4 sentences (as code comments) on which method handled touching/overlapping boxes best and why.
+Module B — Camera Calibration: Pixels to Real Centimeters
+Topics covered: Camera models, intrinsic and extrinsic parameters, radial lens distortion, direct parameter calibration, camera parameters from projection matrices, orthographic/weak perspective/affine/perspective camera models
+1. Print a checkerboard pattern, capture 10–15 photos of it from different angles with your camera, and run direct parameter calibration using cv2.calibrateCamera to recover the intrinsic matrix K (focal length, principal point) and radial distortion coefficients.
+2. Undistort a sample frame using the recovered distortion coefficients and show the before/after. 3. Recover the extrinsic parameters (rotation + translation of the camera relative to the checkerboard/belt plane) for one calibration image, and manually decompose the full projection matrix P = K[R|t] to confirm you can extract K, R, t back out of it.
+4. Using the known real-world size of one reference object (e.g., a box of known dimensions placed on the belt), compute the real-world size of a second, unknown box under four different camera models: orthographic, weak perspective, affine, and full perspective. Report all four size estimates side by side and discuss (in code comments, 2–3 sentences) which is most accurate and why, given your camera's actual field of view and object distance.
+Deliverable: calibrate.py that takes your checkerboard images, saves K and distortion coefficients to a file, and a second script measure_box.py that loads them and prints real-world box dimensions estimated under all four camera models.
+Module C — Motion Representation: How Fast Is the Belt Moving?
+Topics covered: Motion field of rigid objects, motion parallax, optical flow, image brightness constancy equation, affine flow, differential techniques, feature-based techniques, regularization and robust estimation
+1. Implement the Lucas-Kanade differential optical flow method from scratch (solve the brightness-constancy least-squares system yourself for a local window — do not just call cv2.calcOpticalFlowPyrLK for this part) on a pair of consecutive frames, and visualize the flow field as arrows over the image.
+2. Compare it against OpenCV's feature-based sparse optical flow (cv2.calcOpticalFlowPyrLK on corner features from cv2.goodFeaturesToTrack) on the same frame pair, and discuss (comments only) where dense differential flow and sparse feature-based flow disagree (e.g., on textureless box surfaces — the aperture problem).
+3. Fit an affine flow model (6-parameter) to the flow vectors on one box region using least squares, and use RANSAC (robust estimation) to reject outlier flow vectors before fitting — show the inlier/outlier split visually.
+4. From the fitted flow, estimate the belt's real-world speed (cm/s) by combining the pixel displacement with your Module B calibration.
+Deliverable: optical_flow.py producing: (a) the hand-built Lucas-Kanade flow field visualization, (b) the sparse feature-based flow visualization, (c) the RANSAC-fitted affine model with inliers highlighted, (d) a printed belt-speed estimate in cm/s.
+Module D — Motion Tracking: Following a Box Across Frames
+Topics covered: Statistical filtering, iterated estimation, observability and linear systems, the Kalman Filter
+1. Implement a Kalman Filter from scratch (state = [x, y, vx, vy], constant-velocity motion model) to track one box's centroid across the full video, using your Module A segmentation output as noisy position measurements each frame.
+2. Show the filter's predict → measure → update cycle explicitly in your code/output (print the predicted position, the raw noisy measurement, and the corrected estimate for at least 10 consecutive frames).
+3. Simulate measurement dropout: for 3–5 consecutive frames, discard the segmentation measurement entirely (simulate occlusion) and show the Kalman filter continuing to track using pure prediction (this demonstrates observability — the system's ability to infer state even with missing observations, given the linear motion model).
+4. Plot the raw noisy measurements vs. the Kalman-filtered trajectory overlaid on the same axes.
+Deliverable: kalman_tracker.py producing an overlay video/plot of raw detections vs. smoothed Kalman trajectory, including the occlusion-dropout segment.
+Module E — Object Recognition: What Type of Box Is It?
+Topics covered: Alignment, appearance-based methods, invariants, image eigenspaces
+1. Collect small cropped images of each box type visible in your video (at least 3 distinct types, ~10 samples each — rotate/crop from your video frames).
+2. Implement alignment-based recognition: align a query box crop to each reference template using simple geometric alignment (e.g., matching corner keypoints + estimating a homography) and score by residual alignment error.
+3. Implement an appearance-based eigenspace method ("eigenboxes", the same idea as Eigenfaces): build a PCA eigenspace from your training crops, project a new query crop into it, and classify by nearest neighbor in eigenspace. Show the top 3 eigenvectors visualized as images.
+4. Compute at least one invariant feature (e.g., Hu moments, which are invariant to translation/rotation/scale) for each box type and show it correctly discriminates between types even when the box is rotated in the test image.
+5. Report classification accuracy for both the alignment-based and eigenspace-based methods on a held-out test set of crops, and note (in comments) which method is more robust to lighting changes vs. rotation.
+Deliverable: recognize.py with both classifiers implemented, an accuracy comparison table printed at the end, and the eigenvector visualization saved as an image.
+3. Integration (the "real-world" part)
+Chain the modules into a single pipeline run on your video:
+frame stream → Module A (segment boxes each frame)
+→ Module D (Kalman-track each box's centroid over time)
+→ Module B (convert tracked pixel positions/sizes to real-world cm)
+→ Module C (estimate belt speed from optical flow)
+→ Module E (classify each tracked box's type)
+A single pipeline.py that runs all five stages on your video and prints, per tracked box: ID, real-world size (cm), estimated speed (cm/s), and recognized type, is sufficient — it does not need a polished UI.
+4. What to Submit
+● Code repo with 5 module folders + pipeline.py
+● README.md: how to run each module, plus a max-5-sentence note per module on what it demonstrates
+● A 10-minute screen-recorded demo showing the pipeline running on your video, including the segmentation comparison grid, the calibration undistortion, the optical flow visualization, the Kalman tracking overlay, and the recognition accuracy table
+5. Suggested Tools
+Python 3.10+, OpenCV (opencv-python), scikit-image, scikit-learn (Mean Shift, Spectral Clustering, PCA), NumPy (hand-built Lucas-Kanade and Kalman filter), Matplotlib.
