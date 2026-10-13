@@ -48,12 +48,22 @@ import numpy as np
 
 import belt_roi
 import impl
+import shape_fit
+import scene_check
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # Two tuning numbers. Both are "relative", not fixed pixel counts.
 MIN_COLOR_DIFF = 12.0        # LAB distance below this counts as "same colour as belt"
-MIN_RECTANGULARITY = 0.60    # blob area / rotated-rectangle area; lower = more lenient
+MIN_RECTANGULARITY = 0.50    # blob area / rotated-rectangle area; lower = more lenient
+
+# Box-shape knowledge (shape_fit.py)
+REJECT = {}                 # debug: why blobs were thrown away
+MIN_FIT = 0.72              # blob area / quad area
+MIN_SOLIDITY = 0.80         # blob area / convex hull area
+MIN_EDGE_SUPPORT = 0.12     # share of the outline lying on a real image edge
+MAX_HIVIS_FRAC = 0.35       # yellow-green high-vis vest pixels -> a worker, not a box
+MAX_BLUE_FRAC = 0.50        # blue bins / gloves / belt side wall (only if not box-shaped)
 
 # Two more tuning numbers, used by BackgroundFilter.
 STATIC_BG_MATCH = 0.90       # this much of the blob looking like the still room = not a box
@@ -304,7 +314,7 @@ class BackgroundFilter:
         return kept, self.dropped
 
 
-def _split_touching(comp, img, peak_frac=0.6):
+def _split_touching(comp, img, peak_frac=0.45):
     """Cut one blob into several masks if it hides more than one box.
 
     The distance transform gives, for every pixel, the distance to the nearest
@@ -327,11 +337,69 @@ def _split_touching(comp, img, peak_frac=0.6):
     return [((markers == k).astype(np.uint8) * 255) for k in range(2, n + 1)]
 
 
+def _context_frac(hsv, mask):
+    """Share of the blob that is hi-vis yellow-green or blue (workers, bins, belt wall)."""
+    m = mask > 0
+    n = max(int(m.sum()), 1)
+    h, sat, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    hivis = (h >= 22) & (h <= 45) & (sat > 110) & (v > 140)
+    blue = (h >= 100) & (h <= 130) & (sat > 90) & (v > 40)
+    return {"hivis": float((hivis & m).sum() / n), "blue": float((blue & m).sum() / n)}
+
+
+def _belt_region(lab, belt_lab, tol=5.0):
+    """Per-frame belt surface (convex hull), for footage where the camera moves.
+
+    The belt has a known grey-green colour (roi["belt_lab"], sampled once from an empty
+    stretch). Pixels near that colour are belt; the largest connected piece, closed over
+    the boxes that sit on it and wrapped in a convex hull, is the belt region. A fixed
+    rectangle/polygon cannot follow a hand-held camera, this does.
+    """
+    h, w = lab.shape[:2]
+    sc = 4                                          # work at 1/4 size, it is only a region
+    small = cv2.resize(lab, (w // sc, h // sc), interpolation=cv2.INTER_AREA)
+    # Chroma only (a,b): the belt gets lighter and darker with shadow, its hue does not.
+    ab = np.linalg.norm(small[:, :, 1:] - np.array(belt_lab[1:], np.float32), axis=2)
+    m = ((ab < tol) & (small[:, :, 0] > 50) & (small[:, :, 0] < 150)).astype(np.uint8) * 255
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+    n, cc, st, _ = cv2.connectedComponentsWithStats(m)
+    if n < 2:
+        return np.full((h, w), 255, np.uint8)       # no belt found: do not hide anything
+    k = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
+    hull = cv2.convexHull(cv2.findNonZero((cc == k).astype(np.uint8)))
+    reg = np.zeros(m.shape, np.uint8)
+    cv2.fillConvexPoly(reg, hull, 255)
+    # Tall boxes stick up above the belt's far edge, so also take a band above the hull.
+    up = int(0.10 * m.shape[0])
+    cv2.fillConvexPoly(reg, np.maximum(hull - np.array([0, up]), 0), 255)
+    reg = cv2.morphologyEx(reg, cv2.MORPH_CLOSE, np.ones((up * 2 + 1, 1), np.uint8))
+    return cv2.resize(reg, (w, h), interpolation=cv2.INTER_NEAREST)
+
+
+def _cardboard_mask(work, roi, ox, oy):
+    """Mask of cardboard-coloured pixels that lie inside the belt polygon.
+
+    Used when belt_roi.json carries hsv_lo / hsv_hi (and optionally poly). Colour alone
+    cannot tell a box from a worker or a wall in a busy scene, so we only accept pixels
+    that are (a) cardboard coloured and (b) on the belt surface. The tall closing kernel
+    glues the top face and the front face of one box together across the tape/label line.
+    """
+    hsv = cv2.cvtColor(cv2.GaussianBlur(work, (5, 5), 0), cv2.COLOR_BGR2HSV)
+    m = cv2.inRange(hsv, np.array(roi["hsv_lo"], np.uint8), np.array(roi["hsv_hi"], np.uint8))
+    if "poly" in roi:
+        pm = np.zeros(m.shape, np.uint8)
+        cv2.fillPoly(pm, [np.array(roi["poly"], np.int32) - np.array([ox, oy])], 255)
+        m &= pm
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    return cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((25, 9), np.uint8))
+
+
 # ----------------------------------------------------------------------
 # the detector itself
 # ----------------------------------------------------------------------
 
-def segment_boxes(frame, roi=None, min_area_frac=0.004, max_area_frac=0.6, static=None):
+def segment_boxes(frame, roi=None, min_area_frac=0.004, max_area_frac=0.6, static=None, plate=None):
     """Find every box in one video frame.
 
     frame          the colour frame (BGR)
@@ -339,6 +407,9 @@ def segment_boxes(frame, roi=None, min_area_frac=0.004, max_area_frac=0.6, stati
     min_area_frac  smallest allowed box, as a fraction of the belt area
     max_area_frac  biggest allowed box, as a fraction of the belt area
     static         a BackgroundFilter that throws away still room, or None
+    plate          FIXED camera only: the empty-scene picture (scene_check.build_plate). The
+                   detector then finds "what differs from the empty scene" - no belt colour
+                   and no wall/panel false boxes. Same size as the frame.
     returns        (boxes, picture_with_boxes_drawn_on_it)
     """
     H, W = frame.shape[:2]
@@ -360,16 +431,39 @@ def segment_boxes(frame, roi=None, min_area_frac=0.004, max_area_frac=0.6, stati
     # LAB separates colour from brightness much better than BGR.
     # Blur first so single noisy pixels do not change the median.
     lab = cv2.cvtColor(cv2.GaussianBlur(work, (5, 5), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
-    belt = np.median(lab.reshape(-1, 3), axis=0)   # the "average belt colour"
+    pm = None
+    if "belt_lab" in roi:                           # moving camera: find the belt again each frame
+        pm = _belt_region(lab, roi["belt_lab"])
+    elif "poly" in roi:                               # belt polygon: ignore everything outside it
+        pm = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(pm, [np.array(roi["poly"], np.int32) - np.array([ox, oy])], 255)
+    belt = np.median(lab[pm > 0] if pm is not None else lab.reshape(-1, 3), axis=0)   # belt colour
 
     # How far is every pixel from that belt colour? norm() gives the length of the vector.
     diff = np.linalg.norm(lab - belt, axis=2)
+    if pm is not None:
+        diff[pm == 0] = 0                           # outside the belt counts as "belt"
     d8 = np.clip(diff * 4, 0, 255).astype(np.uint8)   # scale 0..63 up to 0..255
 
     # --- step 2: split into "belt" and "not belt" ---
-    t = otsu_threshold(d8)
-    t = max(t, MIN_COLOR_DIFF * 4)               # never segment pure noise
-    mask = (d8 > t).astype(np.uint8) * 255
+    if plate is not None:
+        if plate.shape[:2] != frame.shape[:2]:
+            plate = cv2.resize(plate, (frame.shape[1], frame.shape[0]))
+        mask = scene_check.plate_mask(work, plate[oy:oy + h, ox:ox + w])
+    elif "hsv_lo" in roi:
+        mask = _cardboard_mask(work, roi, ox, oy)   # cardboard colour inside the belt polygon
+    elif "belt_lab" in roi:
+        # Belt pixels = belt hue AND mid brightness (so black and white parcels are NOT belt).
+        ab = np.linalg.norm(lab[:, :, 1:] - np.array(roi["belt_lab"][1:], np.float32), axis=2)
+        beltpix = (ab < 6.0) & (lab[:, :, 0] > 45) & (lab[:, :, 0] < 150)
+        mask = ((~beltpix) & (pm > 0)).astype(np.uint8) * 255
+        mask = cv2.erode(mask, np.ones((3, 3), np.uint8))   # drop 1px belt-edge rims
+        hs = cv2.cvtColor(work, cv2.COLOR_BGR2HSV)          # workers' hi-vis vests are never boxes
+        mask[(hs[:, :, 0] >= 22) & (hs[:, :, 0] <= 45) & (hs[:, :, 1] > 110) & (hs[:, :, 2] > 140)] = 0
+    else:
+        t = otsu_threshold(d8)
+        t = max(t, MIN_COLOR_DIFF * 4)               # never segment pure noise
+        mask = (d8 > t).astype(np.uint8) * 255
 
     # --- step 3: clean the mask ---
     k = max(3, int(round(min(w, h) * 0.012)) | 1)   # kernel size from the frame size
@@ -382,6 +476,10 @@ def segment_boxes(frame, roi=None, min_area_frac=0.004, max_area_frac=0.6, stati
     n, cc, stats, _ = cv2.connectedComponentsWithStats(mask)
     boxes = []
 
+    gray_w = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(cv2.GaussianBlur(gray_w, (3, 3), 0), 40, 110)
+    hsv_w = cv2.cvtColor(work, cv2.COLOR_BGR2HSV)
+
     for i in range(1, n):                 # component 0 is the background, skip it
         x, y, bw, bh, area = stats[i]
         if area < min_area or area > max_area:
@@ -390,34 +488,55 @@ def segment_boxes(frame, roi=None, min_area_frac=0.004, max_area_frac=0.6, stati
         # Cut this one blob out of the label image so the work stays small and fast.
         comp = ((cc[y:y + bh, x:x + bw] == i).astype(np.uint8)) * 255
 
-        for reg in _split_touching(comp, work[y:y + bh, x:x + bw]):
-            cs, _ = cv2.findContours(reg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if not cs:
+        # A blob that is not box-shaped is cut (corner notch / straight edge / watershed);
+        # a blob that already fits one quad is left alone (shape_fit.split_blob).
+        for reg in shape_fit.split_blob(comp, work[y:y + bh, x:x + bw], int(min_area)):
+            c = shape_fit._biggest(reg)
+            if c is None:
                 continue
-            c = max(cs, key=cv2.contourArea)         # the biggest contour of the mask
             ca = cv2.contourArea(c)
             if ca < min_area:
+                REJECT['small'] = REJECT.get('small', 0) + 1
                 continue
 
-            rect = cv2.minAreaRect(c)               # the smallest rotated rectangle
-            ra = rect[1][0] * rect[1][1]            # its area
-            if ra <= 0 or ca / ra < MIN_RECTANGULARITY:
-                continue                             # a real box fills its rectangle
+            fit, sol, quad = shape_fit.fit_score(c)          # B1/B5: is it box shaped?
+            if fit < MIN_FIT or sol < MIN_SOLIDITY or not shape_fit.quad_ok(quad):
+                REJECT['shape'] = REJECT.get('shape', 0) + 1
+                continue
+            L, S = shape_fit.quad_dims(quad)
+            if L / max(S, 1) > 6:
+                REJECT['strip'] = REJECT.get('strip', 0) + 1
+                continue                                     # long thin strip, not a box
 
-            asp = max(rect[1]) / max(min(rect[1]), 1)
-            if asp > 6:
-                continue                             # long thin strip, not a box
+            reg_m = np.zeros((h, w), np.uint8)
+            reg_m[y:y + bh, x:x + bw] = reg
+            cf = _context_frac(hsv_w, reg_m)                 # workers / vests / bins
+            if cf["hivis"] > MAX_HIVIS_FRAC or (cf["blue"] > MAX_BLUE_FRAC and fit < 0.9):
+                REJECT['context'] = REJECT.get('context', 0) + 1
+                continue
+            es = shape_fit.edge_support(c + np.array([x, y]), edges)
+            if es < MIN_EDGE_SUPPORT:
+                REJECT['edge'] = REJECT.get('edge', 0) + 1
+                continue                                     # no real outline = shadow / blur
 
+            tq = shape_fit.top_face(reg, work[y:y + bh, x:x + bw])   # flat top face, or None
             bx, by, bbw, bbh = cv2.boundingRect(c)  # plain axis-aligned box, crop coords
             gx, gy = bx + x + ox, by + y + oy        # move it back to full-frame coords
-            pts = rect_corners(rect) + np.array([x + ox, y + oy])   # corners, full frame
+            off = np.array([x + ox, y + oy])
+            pts = np.round(quad).astype(int) + off                  # quad corners, full frame
+            rect = cv2.minAreaRect(c)
 
             # Cut off by the left or right side of the belt? Then the size is wrong.
             touches = (bx + x) <= 2 or (bx + x + bbw) >= w - 2
             boxes.append({"x": gx, "y": gy, "w": bbw, "h": bbh,
                           "cx": gx + bbw / 2.0, "cy": gy + bbh / 2.0,
-                          "rw": float(max(rect[1])), "rh": float(min(rect[1])),
-                          "pts": pts, "touches_border": bool(touches)})
+                          "rw": float(L), "rh": float(S),            # from the QUAD edges
+                          "rw_rect": float(max(rect[1])), "rh_rect": float(min(rect[1])),
+                          "pts": pts,
+                          "top_quad": (np.round(tq).astype(int) + off) if tq is not None else None,
+                          "fit": fit, "solidity": sol, "edge_support": es,
+                          "score": float(0.5 * fit + 0.3 * es + 0.2 * sol),
+                          "touches_border": bool(touches)})
 
     # Sort left to right, so the numbers do not jump around between frames.
     boxes.sort(key=lambda b: b["cx"])

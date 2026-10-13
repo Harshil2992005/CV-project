@@ -17,3 +17,8 @@ env/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# v3 caches / scratch
+assets/plates/
+_eval/
+assets/video/synthetic_hard.*

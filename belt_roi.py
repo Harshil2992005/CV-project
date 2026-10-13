@@ -203,26 +203,53 @@ def auto_detect_roi(video_path, n_pairs=40, min_frac=0.12):
 # save / load
 # ----------------------------------------------------------------------
 
+CONFIG_FILE = os.path.join(ROOT, "assets", "video_configs.json")     # one entry PER VIDEO
+
+
+def _read_configs():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    return {}
+
+
 def save_roi(roi, video_path=None):
-    """Write the ROI to assets/belt_roi.json together with the video's file name."""
-    os.makedirs(os.path.dirname(ROI_FILE), exist_ok=True)
-    data = dict(roi)
-    data["video"] = os.path.basename(video_path) if video_path else None
-    with open(ROI_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-    print(f"[+] Belt ROI saved -> {ROI_FILE}")
+    """Write the ROI for THIS video into assets/video_configs.json (other videos are kept).
+
+    The old single belt_roi.json was overwritten by every video, so tuning one clip
+    destroyed the settings of the previous one (review point B2).
+    """
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    cfg = _read_configs()
+    key = os.path.basename(video_path) if video_path else "_default"
+    cfg[key] = dict(roi)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+    print(f"[+] Belt ROI for {key} saved -> {CONFIG_FILE}")
+
+
+def _clean_roi(d):
+    roi = {k: int(d[k]) for k in ("x", "y", "w", "h")}
+    for k in ("poly", "hsv_lo", "hsv_hi", "belt_lab"):      # optional: belt polygon + cardboard colour range
+        if k in d:
+            roi[k] = d[k]
+    return roi
 
 
 def load_roi(video_path=None):
-    """Read the saved ROI, but only if it was saved for THIS video. None if not usable."""
+    """The saved ROI for THIS video (new registry first, old belt_roi.json as fallback)."""
+    key = os.path.basename(video_path) if video_path else None
+    cfg = _read_configs()
+    if key and key in cfg:
+        return _clean_roi(cfg[key])
     if not os.path.exists(ROI_FILE):
         return None
     with open(ROI_FILE) as f:
         d = json.load(f)
     # Guard: a saved ROI from another video is ignored instead of being used wrongly.
-    if video_path and d.get("video") and d["video"] != os.path.basename(video_path):
+    if video_path and d.get("video") and d["video"] != key:
         return None
-    return {k: int(d[k]) for k in ("x", "y", "w", "h")}
+    return _clean_roi(d)
 
 
 def get_roi(video_path):
@@ -254,3 +281,43 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ----------------------------------------------------------------------
+# automatic belt colour (fixes B2: no more hand-sampled belt_lab per video)
+# ----------------------------------------------------------------------
+
+def auto_belt_lab(video_path, n_frames=48, neutral_tol=16.0):
+    """Estimate the belt colour (L, a, b) of a video without any hand sampling.
+
+    Idea: a belt is a big, plain, GREY-ish surface that is present in every frame, while
+    boxes come and go. So we (1) take a temporal MEDIAN picture of the whole video, which
+    removes the passing boxes, (2) look only at pixels that are close to neutral grey in
+    chroma (walls, vests and cardboard are not), (3) take the most common chroma there.
+    """
+    cap = cv2.VideoCapture(video_path)
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    stack = []
+    for i in np.linspace(0, max(n - 2, 0), n_frames).astype(int):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(i))
+        ok, f = cap.read()
+        if ok:
+            stack.append(cv2.resize(f, None, fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA))
+    cap.release()
+    if not stack:
+        return None
+    plate = np.median(np.stack(stack), axis=0).astype(np.uint8)
+    lab = cv2.cvtColor(plate, cv2.COLOR_BGR2LAB).astype(np.float32)
+    # keep the lower 70 % of the picture: the belt is never at the very top of the frame
+    lab = lab[int(0.3 * lab.shape[0]):]
+    L, a, b = lab[:, :, 0], lab[:, :, 1], lab[:, :, 2]
+    chroma = np.hypot(a - 128, b - 128)
+    ok = (chroma < neutral_tol) & (L > 35) & (L < 175)
+    if ok.sum() < 200:
+        ok = (L > 35) & (L < 175)
+    aa, bb = a[ok], b[ok]
+    H, xe, ye = np.histogram2d(aa, bb, bins=[32, 32], range=[[96, 160], [96, 160]])
+    i, j = np.unravel_index(np.argmax(H), H.shape)
+    sel = ok & (np.abs(a - (xe[i] + 1)) < 3) & (np.abs(b - (ye[j] + 1)) < 3)
+    return [round(float(np.median(L[sel])), 1), round(float(np.median(a[sel])), 1),
+            round(float(np.median(b[sel])), 1)]

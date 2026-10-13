@@ -36,6 +36,7 @@ video frame
 | [Module E — Recognition](#module-e--recognition) | 4 classifiers compared on the same crops |
 | [The full pipeline](#the-full-pipeline) | all 5 modules chained |
 | [`--impl base` / `--impl alt`](#the-impl-switch) | 20 alternative implementations behind one flag |
+| [v3 — metric box sizes](#v3--metric-box-sizes-read-this-first) | what changed after the accuracy review, how to measure, measured error |
 | [Honest limitations](#honest-limitations) | what this does *not* do |
 | [Requirements](#requirements) | dependencies |
 
@@ -44,7 +45,7 @@ video frame
 ## Quick start
 
 ```bash
-git clone https://github.com/Harshil2992005/CV-project.git
+git clone <this-repo-url>
 cd CV-project
 
 python -m venv .venv
@@ -87,7 +88,80 @@ Keys: `q` quit · `space` pause · `s` save a snapshot.
 
 ---
 
+## v3 — metric box sizes (read this first)
+
+A review of the first version found that most of the size error came from the **footage**
+(moving camera, strong perspective, no known box) and the rest from the **code** (a colour-only
+detector, one scale for the whole frame). v3 fixes the code side and adds tools to check the
+footage. All numbers below are reproducible with the scripts named next to them.
+
+### What changed, point by point
+
+| Review point | Fix | Where |
+|---|---|---|
+| A1/A2 camera not fixed, perspective | `scene_check.py` measures camera shift/zoom and picks the mode; fixed camera → **background subtraction** against the empty-scene "plate" (no belt colour, no wall false boxes) | `scene_check.py`, `box_detect.segment_boxes(plate=)` |
+| A3 which face is the box? | the flat **top face** is found (brightest convex part of the blob) and measured; the silhouette (top+front+side) is only used for tracking | `shape_fit.top_face` |
+| A6/B8 no known size / no `--ref-box-cm` | `--ref-box-cm W D [H]` with `--ref-auto` (first box through) or `--ref-id N` | `pipeline.py` |
+| B1 "what is a box?" | a blob must fit a quad (`fit`), be convex (`solidity`), have a real outline (`edge_support`), not be hi-vis vest / bin coloured | `box_detect.py`, `shape_fit.py` |
+| B2 belt colour hard coded, one roi file overwritten | `belt_roi.auto_belt_lab()` + `--auto-belt`; per-video registry `assets/video_configs.json` | `belt_roi.py` |
+| B3 edges unused | long straight image edges are used to cut blobs; outline edge support is a filter | `shape_fit._cut_edges` |
+| B4 watershed fails on rectangles | cuts at **convexity defects** (continue either face of the notch), then edges, then watershed; a cut is kept only if every piece fits a quad better; over-cut pieces are merged back | `shape_fit.split_blob` |
+| B5 minAreaRect on a 3-D box | perspective **quad** fit; a convex 3-face (hexagon) silhouette is never cut between its faces | `shape_fit.quad_from_contour` |
+| B6 no smoothing / verification | per-track `SizeEstimator`: MAD outlier rejection, spread, "few clean frames / unstable size" flags | `size_model.SizeEstimator` |
+| B7 one `px_per_cm` | **per-box**: `PlaneScale` (homography from the reference top face) or `Camera3D` (pose from the reference + K → every box's own height and top-face size) | `size_model.py` |
+| B9 type from a pixel size | the type is marked `?` when there is no metric scale | `pipeline.py` |
+| B10 unverified claims | numbers below come from a rendered clip with ground truth + unit tests | `tools/`, `tests/` |
+
+### Use it on a new video (this is where the accuracy comes from)
+
+1. Fix the camera (tripod/mount), good light, shutter ≥ 1/500, belt visible, tops of the boxes visible.
+2. Put **one box of known size first** on the belt, **alone** (≥ 10 cm gap to the next box), lying flat.
+3. Check the clip: `python scene_check.py --video assets/video/my.mp4`
+4. Run (needs `calibration.json` made with *that* camera, or `--focal-px`):
+
+```
+python pipeline.py --video assets/video/my.mp4 --ref-auto --ref-box-cm 30 20 15 --calib moduleB/calibration.json
+```
+
+   Without a calibration file it falls back to `PlaneScale` (exact for boxes as tall as the reference).
+   If the first box was not clean, run once, read the IDs in the table and re-run with `--ref-id N`.
+
+### Measured accuracy (rendered fixed-camera clip with known sizes)
+
+`python tools/make_synthetic.py` renders a clip with five 3-D boxes of known size (touching pair
+included); `python tools/eval_synthetic.py` and `python pipeline.py ... --ref-auto` measure it.
+Reference box 30x20x15 cm, everything else unknown to the program:
+
+| true (cm, height) | measured (clean clip) | measured (hard clip: blur, labels, noise, flicker) |
+|---|---|---|
+| 25 x 25 (25) | 25.0 x 24.8, H 25 | 24.5 x 24.2, H 26 |
+| 35 x 25 (20) | 35.0 x 24.8, H 20 | 34.9 x 24.1, H 21 |
+| 20 x 15 (10) | 19.7 x 15.1, H 10 | 19.5 x 14.9, H 10 |
+| 40 x 18 (12) | 39.6 x 17.3, H 12 | 39.2 x 16.5, H 13 |
+| belt 27.0 cm/s | 26.9 | 27.4 |
+
+The old single-scale method on the same clip: 14–44 % error on the same boxes. Unit tests:
+`python -m unittest tests.test_core -v`.
+
+### What v3 does NOT fix
+
+* **The four clips in `assets/video/` are all moving-camera clips** (`scene_check.py`: SD1 14 px shift + 4 % zoom,
+  SD2 85 px + 8 %, HD1 50 px, HD2 115 px). On them the program runs in the per-frame colour mode,
+  prints a warning, and gives **pixel / approximate** sizes only; boxes touching workers, walls or the
+  orange panel are still missed. No detector change can turn such footage into 100 % accurate cm.
+* The numbers above are for a **clean rendered scene**; they show the method is correct, not that a
+  given real warehouse clip will reach the same error. Real error is dominated by the corner accuracy
+  of the top face (roughly ±5 % with a 30 cm reference box seen at 1–1.5 m).
+* Needs: boxes lying flat and axis-aligned with the belt, a straight belt, a reference that travels
+  alone, a calibration of the same camera, and a top face lighter than the front face. Plain,
+  evenly lit or blurred boxes give no top face → fewer clean frames (flagged in the table).
+
+---
+
 ## Results
+
+> These figures were measured on `sd_conveyor_2.mp4` with the **v2** detector. The v3 detector
+> (see above) is stricter about what counts as a box, so counts on the moving-camera clips differ.
 
 Everything below is generated by the code in this repo, not screenshots taken by hand.
 
@@ -127,6 +201,11 @@ CV-project/
 ├─ belt_roi.py               find / load / save the belt rectangle
 ├─ box_detect.py             the shared box detector every other file uses
 ├─ select_roi.py             pick the belt rectangle with the mouse
+├─ scene_check.py            is the camera fixed? + background plate (v3)
+├─ shape_fit.py              quad fit, splitting, top face (v3)
+├─ size_model.py             PlaneScale / Camera3D / robust size (v3)
+├─ tools/                    make_synthetic.py (ground-truth clip), eval_synthetic.py
+├─ tests/test_core.py        unit tests for the geometry
 ├─ impl.py                   the base/alt switch
 ├─ pipeline.py               all 5 modules chained
 ├─ live_demo.py              the same thing, live, with keyboard control
